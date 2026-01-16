@@ -3,8 +3,7 @@
 SongLab - Hugging Face Spaces Entry Point
 """
 
-# Import the Gradio app from songlab_ui
 from songlab_ui import app
 
 if __name__ == "__main__":
-    app.launch()
+    app.launch(server_name="0.0.0.0", server_port=7860)

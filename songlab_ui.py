@@ -274,7 +274,7 @@ def download_and_separate(url, progress=gr.Progress()):
 
 
 # Build the Gradio UI
-with gr.Blocks(title="SongLab - Music Studio") as app:
+with gr.Blocks(title="SongLab - Music Studio", theme=gr.themes.Soft(primary_hue="purple", secondary_hue="pink")) as app:
 
     gr.HTML("""
     <div class="main-title">
@@ -413,6 +413,5 @@ if __name__ == "__main__":
     app.launch(
         share=False,
         show_error=True,
-        server_name="127.0.0.1",
-        theme=gr.themes.Soft(primary_hue="purple", secondary_hue="pink")
+        server_name="127.0.0.1"
     )

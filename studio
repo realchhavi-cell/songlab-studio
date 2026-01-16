@@ -1,0 +1,5 @@
+#!/bin/bash
+# Music Studio launcher - activates venv and runs the app
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/venv/bin/activate"
+python "$SCRIPT_DIR/music_studio.py" "$@"

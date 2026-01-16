@@ -1,0 +1,18 @@
+#!/bin/bash
+# SongLab - Your Personal Music Studio
+# Launcher script
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/venv/bin/activate"
+
+if [ "$1" = "ui" ] || [ -z "$1" ]; then
+    echo ""
+    echo "=============================================="
+    echo "  SongLab - Your Personal Music Studio"
+    echo "=============================================="
+    echo ""
+    echo "Starting web interface..."
+    python "$SCRIPT_DIR/songlab_ui.py"
+else
+    python "$SCRIPT_DIR/music_studio.py" "$@"
+fi

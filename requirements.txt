@@ -3,3 +3,4 @@ demucs
 torch
 torchaudio
 yt-dlp
+syncedlyrics

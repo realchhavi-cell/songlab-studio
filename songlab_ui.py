@@ -8,8 +8,8 @@ import gradio as gr
 import subprocess
 import os
 import shutil
+import re
 from pathlib import Path
-import tempfile
 
 # Project directories
 PROJECT_DIR = Path(__file__).parent.resolve()
@@ -29,18 +29,148 @@ def get_ytdlp():
     return None
 
 
+def fetch_lyrics(song_title, artist=""):
+    """Fetch synced lyrics for a song."""
+    try:
+        import syncedlyrics
+
+        search_query = f"{song_title} {artist}".strip()
+
+        # Try to get synced (LRC) lyrics first
+        lrc = syncedlyrics.search(search_query, synced_only=True)
+
+        if lrc:
+            return lrc, "synced"
+
+        # Fall back to plain lyrics
+        plain = syncedlyrics.search(search_query, synced_only=False)
+        if plain:
+            return plain, "plain"
+
+        return None, None
+    except Exception as e:
+        print(f"Lyrics fetch error: {e}")
+        return None, None
+
+
+def parse_lrc_to_html(lrc_text):
+    """Convert LRC format to HTML with timestamps for display."""
+    if not lrc_text:
+        return ""
+
+    lines = lrc_text.strip().split('\n')
+    html_lines = []
+
+    # LRC timestamp pattern: [mm:ss.xx] or [mm:ss]
+    timestamp_pattern = re.compile(r'\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?\]')
+
+    for line in lines:
+        # Skip metadata lines like [ar:Artist]
+        if line.startswith('[') and ':' in line and not timestamp_pattern.match(line):
+            continue
+
+        # Extract timestamp and text
+        match = timestamp_pattern.match(line)
+        if match:
+            minutes = int(match.group(1))
+            seconds = int(match.group(2))
+            total_seconds = minutes * 60 + seconds
+            text = timestamp_pattern.sub('', line).strip()
+
+            if text:  # Only add non-empty lines
+                html_lines.append(f'<div class="lyric-line" data-time="{total_seconds}">'
+                                  f'<span class="timestamp">[{minutes:02d}:{seconds:02d}]</span> '
+                                  f'<span class="text">{text}</span></div>')
+        else:
+            # Plain text line
+            text = line.strip()
+            if text and not text.startswith('['):
+                html_lines.append(f'<div class="lyric-line"><span class="text">{text}</span></div>')
+
+    return '\n'.join(html_lines)
+
+
+def format_lyrics_display(lrc_text, lyrics_type):
+    """Format lyrics for display in Gradio."""
+    if not lrc_text:
+        return "No lyrics found. Try searching manually with artist name."
+
+    if lyrics_type == "synced":
+        # Parse LRC and create formatted display
+        lines = lrc_text.strip().split('\n')
+        formatted_lines = []
+
+        timestamp_pattern = re.compile(r'\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?\]')
+
+        for line in lines:
+            # Skip metadata
+            if line.startswith('[') and ':' in line and not timestamp_pattern.match(line):
+                continue
+
+            match = timestamp_pattern.match(line)
+            if match:
+                minutes = int(match.group(1))
+                seconds = int(match.group(2))
+                text = timestamp_pattern.sub('', line).strip()
+                if text:
+                    formatted_lines.append(f"[{minutes:02d}:{seconds:02d}] {text}")
+            else:
+                text = line.strip()
+                if text and not text.startswith('['):
+                    formatted_lines.append(text)
+
+        return '\n'.join(formatted_lines)
+    else:
+        # Plain lyrics - just clean up
+        return lrc_text
+
+
+def extract_song_info_from_filename(filename):
+    """Try to extract song title and artist from filename."""
+    if not filename:
+        return "", ""
+
+    name = Path(filename).stem
+
+    # Common patterns: "Artist - Song", "Song - Artist", "Song (Artist)"
+    # Clean up common suffixes
+    name = re.sub(r'_instrumental|_vocals|_transposed.*|\(Official.*\)|\(Lyric.*\)|【.*】|\[.*\]', '', name, flags=re.IGNORECASE)
+    name = name.strip()
+
+    # Try to split by " - "
+    if ' - ' in name:
+        parts = name.split(' - ', 1)
+        return parts[1].strip(), parts[0].strip()  # Assume "Artist - Song"
+
+    return name, ""
+
+
+def search_lyrics(song_title, artist_name):
+    """Search for lyrics with given title and artist."""
+    if not song_title:
+        return "Please enter a song title"
+
+    lyrics, lyrics_type = fetch_lyrics(song_title, artist_name)
+
+    if lyrics:
+        formatted = format_lyrics_display(lyrics, lyrics_type)
+        status = "Synced lyrics found!" if lyrics_type == "synced" else "Plain lyrics found (no timestamps)"
+        return formatted
+    else:
+        return "No lyrics found. Try different spelling or add artist name."
+
+
 def download_from_youtube(url, progress=gr.Progress()):
     """Download audio from YouTube URL."""
     if not url or not url.strip():
-        return None, "Please enter a YouTube URL"
+        return None, "Please enter a YouTube URL", ""
 
     ytdlp = get_ytdlp()
     if not ytdlp:
-        return None, "Error: yt-dlp not found. Please install it."
+        return None, "Error: yt-dlp not found. Please install it.", ""
 
     progress(0.1, desc="Starting download...")
 
-    # Create a safe filename
     output_template = str(OUTPUT_DIR / '%(title)s.%(ext)s')
 
     cmd = [
@@ -57,12 +187,14 @@ def download_from_youtube(url, progress=gr.Progress()):
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
-        return None, f"Download failed: {result.stderr}"
+        return None, f"Download failed: {result.stderr}", ""
 
     downloaded_file = result.stdout.strip().split('\n')[-1]
+    song_name = Path(downloaded_file).stem
+
     progress(1.0, desc="Download complete!")
 
-    return downloaded_file, f"Downloaded: {Path(downloaded_file).name}"
+    return downloaded_file, f"Downloaded: {song_name}", song_name
 
 
 def remove_vocals(audio_file, progress=gr.Progress()):
@@ -109,7 +241,6 @@ def remove_vocals(audio_file, progress=gr.Progress()):
     sources = sources.squeeze(0).cpu()
     stem_names = model.sources
 
-    # Get vocals and create instrumental
     vocals_idx = stem_names.index('vocals')
     vocals = sources[vocals_idx]
 
@@ -121,14 +252,12 @@ def remove_vocals(audio_file, progress=gr.Progress()):
             else:
                 instrumental = instrumental + sources[i]
 
-    # Save files
     temp_wav_inst = output_instrumental.with_suffix('.wav')
     temp_wav_voc = output_vocals.with_suffix('.wav')
 
     torchaudio.save(str(temp_wav_inst), instrumental, sr)
     torchaudio.save(str(temp_wav_voc), vocals, sr)
 
-    # Convert to mp3
     subprocess.run(['ffmpeg', '-y', '-i', str(temp_wav_inst), '-acodec', 'libmp3lame', '-q:a', '2', str(output_instrumental)], capture_output=True)
     subprocess.run(['ffmpeg', '-y', '-i', str(temp_wav_voc), '-acodec', 'libmp3lame', '-q:a', '2', str(output_vocals)], capture_output=True)
 
@@ -182,7 +311,7 @@ def separate_stems(audio_file, progress=gr.Progress()):
 
     progress(0.8, desc="Saving stem files...")
     sources = sources.squeeze(0).cpu()
-    stem_names = model.sources  # ['drums', 'bass', 'other', 'vocals']
+    stem_names = model.sources
 
     stem_files = {}
     for i, stem_name in enumerate(stem_names):
@@ -221,19 +350,16 @@ def transpose_audio(audio_file, semitones, progress=gr.Progress()):
 
     progress(0.2, desc="Analyzing audio...")
 
-    # Get sample rate
     probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a:0',
                  '-show_entries', 'stream=sample_rate', '-of', 'default=noprint_wrappers=1:nokey=1',
                  str(audio_file)]
     probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
     sample_rate = int(probe_result.stdout.strip()) if probe_result.stdout.strip() else 44100
 
-    # Calculate pitch shift
     pitch_multiplier = 2 ** (semitones / 12)
     new_rate = int(sample_rate * pitch_multiplier)
     tempo_factor = 1 / pitch_multiplier
 
-    # Build atempo filter chain
     atempo_filters = []
     remaining = tempo_factor
     while remaining > 2.0:
@@ -259,37 +385,59 @@ def transpose_audio(audio_file, semitones, progress=gr.Progress()):
     return str(output_file), f"Transposed by {semitones:+} semitones"
 
 
-def download_and_separate(url, progress=gr.Progress()):
-    """Download from YouTube and separate vocals in one step."""
+def download_and_separate_with_lyrics(url, progress=gr.Progress()):
+    """Download from YouTube, separate vocals, and fetch lyrics."""
     progress(0.1, desc="Downloading from YouTube...")
-    audio_file, msg = download_from_youtube(url, progress)
+    audio_file, msg, song_name = download_from_youtube(url, progress)
 
     if audio_file is None:
-        return None, None, None, msg
+        return None, None, None, msg, "", ""
+
+    progress(0.3, desc="Fetching lyrics...")
+    song_title, artist = extract_song_info_from_filename(audio_file)
+    lyrics, lyrics_type = fetch_lyrics(song_title, artist)
+    formatted_lyrics = format_lyrics_display(lyrics, lyrics_type) if lyrics else "No lyrics found. Search manually below."
 
     progress(0.4, desc="Separating vocals...")
     instrumental, vocals, result_msg = remove_vocals(audio_file, progress)
 
-    return audio_file, instrumental, vocals, f"Downloaded and separated: {Path(audio_file).name}"
+    return audio_file, instrumental, vocals, f"Downloaded and separated: {song_name}", formatted_lyrics, song_name
+
+
+def process_local_file_with_lyrics(audio_file, progress=gr.Progress()):
+    """Remove vocals from local file and try to fetch lyrics."""
+    if audio_file is None:
+        return None, None, "Please provide an audio file", "", ""
+
+    song_title, artist = extract_song_info_from_filename(audio_file)
+
+    progress(0.1, desc="Fetching lyrics...")
+    lyrics, lyrics_type = fetch_lyrics(song_title, artist)
+    formatted_lyrics = format_lyrics_display(lyrics, lyrics_type) if lyrics else "No lyrics found. Search manually below."
+
+    progress(0.2, desc="Removing vocals...")
+    instrumental, vocals, status = remove_vocals(audio_file, progress)
+
+    return instrumental, vocals, status, formatted_lyrics, song_title
 
 
 # Build the Gradio UI
 with gr.Blocks(title="SongLab - Music Studio", theme=gr.themes.Soft(primary_hue="purple", secondary_hue="pink")) as app:
 
     gr.HTML("""
-    <div class="main-title">
-        <h1>SongLab</h1>
-        <p>Your Personal Music Studio - Karaoke Maker, Stem Separator & Transposer</p>
+    <div style="text-align: center; padding: 20px;">
+        <h1 style="font-size: 2.5rem; margin-bottom: 0.5rem;">SongLab</h1>
+        <p style="color: #666;">Your Personal Music Studio - Karaoke Maker with Lyrics</p>
     </div>
     """)
 
     with gr.Tabs():
-        # Tab 1: Quick Karaoke (Download + Remove Vocals)
+        # Tab 1: Karaoke Maker with Lyrics
         with gr.TabItem("Karaoke Maker"):
-            gr.Markdown("### Create karaoke tracks from YouTube or local files")
+            gr.Markdown("### Create karaoke tracks with synchronized lyrics")
 
             with gr.Row():
-                with gr.Column():
+                with gr.Column(scale=1):
                     yt_url = gr.Textbox(
                         label="YouTube URL",
                         placeholder="https://www.youtube.com/watch?v=...",
@@ -301,22 +449,48 @@ with gr.Blocks(title="SongLab - Music Studio", theme=gr.themes.Soft(primary_hue=
                     local_file = gr.Audio(label="Upload Audio File", type="filepath")
                     local_karaoke_btn = gr.Button("Remove Vocals from File", variant="secondary")
 
-                with gr.Column():
                     karaoke_status = gr.Textbox(label="Status", interactive=False)
+
+                with gr.Column(scale=1):
                     original_audio = gr.Audio(label="Original", type="filepath")
                     instrumental_audio = gr.Audio(label="Instrumental (Karaoke)", type="filepath")
                     vocals_audio = gr.Audio(label="Vocals", type="filepath")
 
+            gr.Markdown("---")
+            gr.Markdown("### Lyrics")
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    song_title_input = gr.Textbox(label="Song Title", placeholder="Enter song title...")
+                    artist_input = gr.Textbox(label="Artist (optional)", placeholder="Enter artist name...")
+                    search_lyrics_btn = gr.Button("Search Lyrics", variant="secondary")
+
+                with gr.Column(scale=2):
+                    lyrics_display = gr.Textbox(
+                        label="Lyrics",
+                        lines=15,
+                        max_lines=25,
+                        interactive=False,
+                        placeholder="Lyrics will appear here after processing...\n\nTimestamps show when each line should be sung."
+                    )
+
+            # Connect buttons
             karaoke_btn.click(
-                fn=download_and_separate,
+                fn=download_and_separate_with_lyrics,
                 inputs=[yt_url],
-                outputs=[original_audio, instrumental_audio, vocals_audio, karaoke_status]
+                outputs=[original_audio, instrumental_audio, vocals_audio, karaoke_status, lyrics_display, song_title_input]
             )
 
             local_karaoke_btn.click(
-                fn=remove_vocals,
+                fn=process_local_file_with_lyrics,
                 inputs=[local_file],
-                outputs=[instrumental_audio, vocals_audio, karaoke_status]
+                outputs=[instrumental_audio, vocals_audio, karaoke_status, lyrics_display, song_title_input]
+            )
+
+            search_lyrics_btn.click(
+                fn=search_lyrics,
+                inputs=[song_title_input, artist_input],
+                outputs=[lyrics_display]
             )
 
         # Tab 2: YouTube Download
@@ -337,7 +511,7 @@ with gr.Blocks(title="SongLab - Music Studio", theme=gr.themes.Soft(primary_hue=
                     dl_audio = gr.Audio(label="Downloaded Audio", type="filepath")
 
             dl_btn.click(
-                fn=download_from_youtube,
+                fn=lambda url: download_from_youtube(url)[:2],
                 inputs=[dl_url],
                 outputs=[dl_audio, dl_status]
             )
@@ -398,7 +572,7 @@ with gr.Blocks(title="SongLab - Music Studio", theme=gr.themes.Soft(primary_hue=
 
     gr.HTML("""
     <div style="text-align: center; margin-top: 2rem; color: #666;">
-        <p>SongLab uses Demucs AI for high-quality audio separation</p>
+        <p>SongLab uses Demucs AI for audio separation | Lyrics powered by syncedlyrics</p>
     </div>
     """)
 

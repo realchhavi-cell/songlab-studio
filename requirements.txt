@@ -1,6 +1,6 @@
-gradio>=4.0.0
+gradio==4.44.0
 demucs
 torch
 torchaudio
-torchcodec
 yt-dlp
+huggingface_hub>=0.23.0,<1.0.0
